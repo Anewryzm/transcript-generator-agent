@@ -16,14 +16,23 @@ def respond(message, history):
     # Format conversation history for Claude
     messages = []
     
-    # Add chat history
-    for h in history:
-        messages.append({"role": "user", "content": h[0]})
-        if h[1]:  # Check if there's an assistant response
-            messages.append({"role": "assistant", "content": h[1]})
+    # Debug: Print the structure of history
+    print(f"History: {history}")
+    
+    # Add chat history - clean up message format to only include role and content
+    if history:
+        for item in history:
+            if isinstance(item, dict) and 'role' in item and 'content' in item:
+                # Only include role and content fields that Claude API expects
+                messages.append({
+                    "role": item["role"],
+                    "content": item["content"]
+                })
     
     # Add the current message
     messages.append({"role": "user", "content": message})
+    
+    print(f"Messages to send: {messages}")
     
     # Call the Claude API
     response = client.messages.create(
