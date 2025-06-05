@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from smolagents.mcp_client import MCPClient
 from gradio import ChatMessage
 import concurrent.futures
+import uuid
+import shutil
 
 # Load environment variables
 load_dotenv()
@@ -19,12 +21,16 @@ mcp_url = "https://agents-mcp-hackathon-transcript-generator.hf.space/gradio_api
 # Global variable to store tools
 mcp_tools = {}
 
+# Create a directory to store temporary files
+TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_files")
+os.makedirs(TEMP_DIR, exist_ok=True)
+
 # Initialize tools at startup
 def initialize_tools():
     global mcp_tools
     try:
         # Connect to MCP server and fetch tools
-        with MCPClient({"url": mcp_url}) as mcp_client:
+        with MCPClient({"url": mcp_url, "transport": "sse"}) as mcp_client:
             # Store tools in the global dictionary
             mcp_tools = {tool.name: tool for tool in mcp_client}
             print(f"Loaded tools: {', '.join(mcp_tools.keys())}")
@@ -61,7 +67,7 @@ def validate_file(file):
     return True, "File is valid"
 
 # Process the transcription using the MCP tool
-def process_transcription(audio_file):
+def process_transcription(audio_file, request: gr.Request):
     try:
         global mcp_tools
         
@@ -75,6 +81,22 @@ def process_transcription(audio_file):
         if not tool:
             return "Error: Transcription tool not available"
         
+        # Create a copy of the file with a unique name to avoid conflicts
+        file_ext = os.path.splitext(audio_file)[1]
+        unique_filename = f"{uuid.uuid4()}{file_ext}"
+        temp_file_path = os.path.join(TEMP_DIR, unique_filename)
+        shutil.copy2(audio_file, temp_file_path)
+        
+        # Get the base URL from the request
+        base_url = str(request.base_url)
+        if base_url.endswith('/'):
+            base_url = base_url[:-1]
+            
+        # Create a URL that points to our custom route
+        file_url = f"{base_url}/audio_files/{unique_filename}"
+        
+        print(f"Using file URL: {file_url}")
+        
         # Create a new MCP client for this specific transaction
         with MCPClient({"url": mcp_url}) as mcp_client:
             transcription_tool = next((t for t in mcp_client if t.name == "transcript_generator_transcribe_audio"), None)
@@ -82,8 +104,8 @@ def process_transcription(audio_file):
             if not transcription_tool:
                 return "Error: Transcription tool not found in MCP client"
             
-            # Call the tool with the audio file
-            result = transcription_tool(audio_file=audio_file)
+            # Call the tool with the audio file URL
+            result = transcription_tool(audio_file=file_url)
             return result
             
     except Exception as e:
@@ -93,7 +115,7 @@ def process_transcription(audio_file):
         return f"Error: {str(e)}"
 
 # Main chat function (streaming, with tool usage)
-def chat_with_tools(user_message, history, audio_file):
+def chat_with_tools(user_message, history, audio_file, request: gr.Request):
     # Add user message
     history = history or []
     messages = format_history(history)
@@ -132,7 +154,7 @@ def chat_with_tools(user_message, history, audio_file):
             )]
             
             # Process transcription 
-            tool_result = process_transcription(audio_file)
+            tool_result = process_transcription(audio_file, request)
             
             if tool_result.startswith("Error:"):
                 history.append(ChatMessage(
@@ -216,6 +238,13 @@ with gr.Blocks() as demo:
     # Clear button
     clear = gr.Button("Clear Conversation")
     clear.click(lambda: (None, None), outputs=[chatbot, audio_file])
+    
+    # Add a custom route to serve audio files
+    @demo.app.get("/audio_files/{filename}")
+    async def serve_audio_file(filename: str):
+        from fastapi.responses import FileResponse
+        file_path = os.path.join(TEMP_DIR, filename)
+        return FileResponse(file_path)
 
 if __name__ == "__main__":
     demo.launch()
