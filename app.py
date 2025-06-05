@@ -12,8 +12,12 @@ import shutil
 # Load environment variables
 load_dotenv()
 
-# Initialize Anthropic client
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+# Get API keys from environment or use None as default
+anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+groq_api_key = os.environ.get("GROQ_API_KEY")
+
+# Initialize Anthropic client (will be updated if user provides a key)
+client = anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
 
 # MCP connection details
 mcp_url = "https://agents-mcp-hackathon-transcript-generator.hf.space/gradio_api/mcp/sse"
@@ -67,9 +71,13 @@ def validate_file(file):
     return True, "File is valid"
 
 # Process the transcription using the MCP tool
-def process_transcription(audio_file, groq_api_key, request: gr.Request):
+def process_transcription(audio_file, user_groq_api_key, request: gr.Request):
     try:
         global mcp_tools
+        global groq_api_key
+        
+        # Use environment variable or user-provided key
+        current_groq_api_key = groq_api_key if groq_api_key else user_groq_api_key
         
         # Check if tools are initialized
         if not mcp_tools:
@@ -105,7 +113,7 @@ def process_transcription(audio_file, groq_api_key, request: gr.Request):
                 return "Error: Transcription tool not found in MCP client"
             
             # Call the tool with the audio file URL and GROQ API key
-            result = transcription_tool(audio_file=file_url, api_key=groq_api_key)
+            result = transcription_tool(audio_file=file_url, api_key=current_groq_api_key)
             return result
             
     except Exception as e:
@@ -115,7 +123,24 @@ def process_transcription(audio_file, groq_api_key, request: gr.Request):
         return f"Error: {str(e)}"
 
 # Main chat function (streaming, with tool usage)
-def chat_with_tools(user_message, history, audio_file, groq_api_key, request: gr.Request):
+def chat_with_tools(user_message, history, audio_file, user_groq_api_key, user_anthropic_api_key, request: gr.Request):
+    global client, anthropic_api_key, groq_api_key
+    
+    # Check if we need to update the Anthropic client with user-provided API key
+    current_anthropic_api_key = anthropic_api_key if anthropic_api_key else user_anthropic_api_key
+    if not current_anthropic_api_key:
+        history.append(ChatMessage(
+            role="assistant",
+            content="Please provide an Anthropic API key to continue.",
+            metadata={"title": "❌ Error", "status": "done"}
+        ))
+        yield history
+        return
+    
+    # Update client if needed
+    if client is None or (not anthropic_api_key and user_anthropic_api_key):
+        client = anthropic.Anthropic(api_key=current_anthropic_api_key)
+    
     # Add user message
     history = history or []
     messages = format_history(history)
@@ -146,8 +171,9 @@ def chat_with_tools(user_message, history, audio_file, groq_api_key, request: gr
     # 2. Tool usage phase - Process transcription if there's an audio file
     if audio_file is not None:
         try:
-            # Check if GROQ API key is provided
-            if not groq_api_key:
+            # Check if GROQ API key is available (either from env or user input)
+            current_groq_api_key = groq_api_key if groq_api_key else user_groq_api_key
+            if not current_groq_api_key:
                 history.append(ChatMessage(
                     role="assistant",
                     content="Please provide a GROQ API key to process the transcription.",
@@ -164,7 +190,7 @@ def chat_with_tools(user_message, history, audio_file, groq_api_key, request: gr
             )]
             
             # Process transcription with GROQ API key
-            tool_result = process_transcription(audio_file, groq_api_key, request)
+            tool_result = process_transcription(audio_file, user_groq_api_key, request)
             
             if tool_result.startswith("Error:"):
                 history.append(ChatMessage(
@@ -201,12 +227,20 @@ def chat_with_tools(user_message, history, audio_file, groq_api_key, request: gr
         yield history
 
     # 3. Claude response phase
-    response = client.messages.create(
-        model="claude-3-7-sonnet-latest",
-        max_tokens=4096,
-        messages=messages
-    )
-    history.append(ChatMessage(role="assistant", content=response.content[0].text))
+    try:
+        response = client.messages.create(
+            model="claude-3-7-sonnet-latest",
+            max_tokens=4096,
+            messages=messages
+        )
+        history.append(ChatMessage(role="assistant", content=response.content[0].text))
+    except Exception as e:
+        history.append(ChatMessage(
+            role="assistant",
+            content=f"Error connecting to Claude: {str(e)}",
+            metadata={"title": "❌ Error", "status": "done"}
+        ))
+    
     yield history
 
 # Initialize tools at startup
@@ -232,11 +266,23 @@ with gr.Blocks() as demo:
                 type="filepath"
             )
             
-            groq_api_key = gr.Textbox(
-                label="GROQ API Key",
-                placeholder="Enter your GROQ API key",
+            # Display API key inputs only if environment variables are not set
+            anthropic_api_key_input = gr.Textbox(
+                label="Anthropic API Key" + (" (using env variable)" if anthropic_api_key else ""),
+                placeholder="Enter your Anthropic API key" if not anthropic_api_key else "Using environment variable",
                 type="password",
-                show_label=True
+                show_label=True,
+                interactive=not anthropic_api_key,
+                value="" if not anthropic_api_key else None
+            )
+            
+            groq_api_key_input = gr.Textbox(
+                label="GROQ API Key" + (" (using env variable)" if groq_api_key else ""),
+                placeholder="Enter your GROQ API key" if not groq_api_key else "Using environment variable",
+                type="password",
+                show_label=True,
+                interactive=not groq_api_key,
+                value="" if not groq_api_key else None
             )
     
     with gr.Row():
@@ -249,12 +295,12 @@ with gr.Blocks() as demo:
         btn = gr.Button("Send", scale=1)
     
     # Connect components
-    btn.click(chat_with_tools, [msg, chatbot, audio_file, groq_api_key], [chatbot], queue=True)
-    msg.submit(chat_with_tools, [msg, chatbot, audio_file, groq_api_key], [chatbot], queue=True)
+    btn.click(chat_with_tools, [msg, chatbot, audio_file, groq_api_key_input, anthropic_api_key_input], [chatbot], queue=True)
+    msg.submit(chat_with_tools, [msg, chatbot, audio_file, groq_api_key_input, anthropic_api_key_input], [chatbot], queue=True)
     
     # Clear button
     clear = gr.Button("Clear Conversation")
-    clear.click(lambda: (None, None, None), outputs=[chatbot, audio_file, groq_api_key])
+    clear.click(lambda: (None, None, None, None, None), outputs=[chatbot, audio_file, groq_api_key_input, anthropic_api_key_input])
     
     # Add a custom route to serve audio files
     @demo.app.get("/audio_files/{filename}")
