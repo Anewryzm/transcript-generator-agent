@@ -1,9 +1,11 @@
 import gradio as gr
 import anthropic
 import os
+import asyncio
 from dotenv import load_dotenv
 from smolagents.mcp_client import MCPClient
 from gradio import ChatMessage
+import concurrent.futures
 
 # Load environment variables
 load_dotenv()
@@ -11,14 +13,25 @@ load_dotenv()
 # Initialize Anthropic client
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
-# Connect to your MCP server and fetch tools
+# MCP connection details
 mcp_url = "https://agents-mcp-hackathon-transcript-generator.hf.space/gradio_api/mcp/sse"
-tools = None
-with MCPClient({"url": mcp_url}) as mcp_tools:
-    tools = {tool.name: tool for tool in mcp_tools}
 
-    # log the tools loaded
-    print(f"Loaded tools: {', '.join(tools.keys())}")
+# Global variable to store tools
+mcp_tools = {}
+
+# Initialize tools at startup
+def initialize_tools():
+    global mcp_tools
+    try:
+        # Connect to MCP server and fetch tools
+        with MCPClient({"url": mcp_url}) as mcp_client:
+            # Store tools in the global dictionary
+            mcp_tools = {tool.name: tool for tool in mcp_client}
+            print(f"Loaded tools: {', '.join(mcp_tools.keys())}")
+        return True
+    except Exception as e:
+        print(f"Failed to initialize MCP tools: {e}")
+        return False
 
 # Helper: Format history for Claude
 def format_history(history):
@@ -47,6 +60,38 @@ def validate_file(file):
     
     return True, "File is valid"
 
+# Process the transcription using the MCP tool
+def process_transcription(audio_file):
+    try:
+        global mcp_tools
+        
+        # Check if tools are initialized
+        if not mcp_tools:
+            if not initialize_tools():
+                return "Error: Failed to initialize MCP tools"
+        
+        # Get the transcription tool
+        tool = mcp_tools.get("transcript_generator_transcribe_audio")
+        if not tool:
+            return "Error: Transcription tool not available"
+        
+        # Create a new MCP client for this specific transaction
+        with MCPClient({"url": mcp_url}) as mcp_client:
+            transcription_tool = next((t for t in mcp_client if t.name == "transcript_generator_transcribe_audio"), None)
+            
+            if not transcription_tool:
+                return "Error: Transcription tool not found in MCP client"
+            
+            # Call the tool with the audio file
+            result = transcription_tool(audio_file=audio_file)
+            return result
+            
+    except Exception as e:
+        import traceback
+        print(f"Transcription error: {e}")
+        print(traceback.format_exc())
+        return f"Error: {str(e)}"
+
 # Main chat function (streaming, with tool usage)
 def chat_with_tools(user_message, history, audio_file):
     # Add user message
@@ -62,7 +107,7 @@ def chat_with_tools(user_message, history, audio_file):
             history.append(ChatMessage(
                 role="assistant",
                 content=message,
-                metadata={"title": "❌ Error", "status": "error"}
+                metadata={"title": "❌ Error", "status": "done"}
             ))
             yield history
             return
@@ -78,38 +123,40 @@ def chat_with_tools(user_message, history, audio_file):
 
     # 2. Tool usage phase - Process transcription if there's an audio file
     if audio_file is not None:
-        tool = tools.get("transcript_generator_transcribe_audio")
-        if tool:
-            try:
-                # Show tool call status
-                yield history + [ChatMessage(
-                    role="assistant", 
-                    content="Processing your audio file...", 
-                    metadata={"title": "🛠️ Tool Usage", "status": "pending"}
-                )]
-                
-                # Call the transcription tool with the uploaded file
-                tool_result = tool(audio_file)
-                
+        try:
+            # Show tool call status
+            yield history + [ChatMessage(
+                role="assistant", 
+                content="Processing your audio file...", 
+                metadata={"title": "🛠️ Tool Usage", "status": "pending"}
+            )]
+            
+            # Process transcription 
+            tool_result = process_transcription(audio_file)
+            
+            if tool_result.startswith("Error:"):
+                history.append(ChatMessage(
+                    role="assistant",
+                    content=tool_result,
+                    metadata={"title": "❌ Error", "status": "done"}
+                ))
+            else:
                 # Add tool result to history
                 history.append(ChatMessage(
                     role="assistant",
                     content=f"**Transcription Result:**\n\n{tool_result}",
                     metadata={"title": "🎙️ Transcription", "status": "done"}
                 ))
-                yield history
-            except Exception as e:
-                history.append(ChatMessage(
-                    role="assistant",
-                    content=f"Error processing the audio file: {str(e)}",
-                    metadata={"title": "❌ Error", "status": "error"}
-                ))
-                yield history
-        else:
+            yield history
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Error details: {error_details}")
+            
             history.append(ChatMessage(
                 role="assistant",
-                content="Transcription tool not available.",
-                metadata={"title": "❌ Error", "status": "error"}
+                content=f"Error processing the audio file: {str(e)}",
+                metadata={"title": "❌ Error", "status": "done"}
             ))
             yield history
     # Manual transcript request without file
@@ -129,6 +176,9 @@ def chat_with_tools(user_message, history, audio_file):
     )
     history.append(ChatMessage(role="assistant", content=response.content[0].text))
     yield history
+
+# Initialize tools at startup
+initialize_tools()
 
 # Create the Gradio interface with file upload
 with gr.Blocks() as demo:
