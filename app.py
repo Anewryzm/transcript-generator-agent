@@ -28,6 +28,25 @@ def format_history(history):
             messages.append({"role": item["role"], "content": item["content"]})
     return messages
 
+# File validation function
+def validate_file(file):
+    """Validate uploaded file type and size."""
+    if file is None:
+        return False, "No file uploaded"
+    
+    # Check file size (25MB limit)
+    file_size_mb = os.path.getsize(file) / (1024 * 1024)
+    if file_size_mb > 25:
+        return False, f"File size ({file_size_mb:.1f}MB) exceeds 25MB limit"
+    
+    # Check file extension
+    valid_extensions = ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm', '.flac', '.ogg', '.aac']
+    file_extension = os.path.splitext(file)[1].lower()
+    if file_extension not in valid_extensions:
+        return False, f"Invalid file type. Supported formats: {', '.join(valid_extensions)}"
+    
+    return True, "File is valid"
+
 # Main chat function (streaming, with tool usage)
 def chat_with_tools(user_message, history, audio_file):
     # Add user message
@@ -37,6 +56,17 @@ def chat_with_tools(user_message, history, audio_file):
     # Check if a file was uploaded
     file_message = ""
     if audio_file is not None:
+        # Validate the file
+        is_valid, message = validate_file(audio_file)
+        if not is_valid:
+            history.append(ChatMessage(
+                role="assistant",
+                content=message,
+                metadata={"title": "❌ Error", "status": "error"}
+            ))
+            yield history
+            return
+            
         file_name = os.path.basename(audio_file)
         file_message = f"\n[Attached file: {file_name}]"
     
@@ -116,7 +146,7 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             audio_file = gr.File(
                 label="Upload Audio/Video File",
-                file_types=["audio/*", "video/*"],
+                file_types=[".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".flac", ".ogg", ".aac"],
                 type="filepath"
             )
     
