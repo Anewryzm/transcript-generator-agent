@@ -67,7 +67,7 @@ def validate_file(file):
     return True, "File is valid"
 
 # Process the transcription using the MCP tool
-def process_transcription(audio_file, request: gr.Request):
+def process_transcription(audio_file, groq_api_key, request: gr.Request):
     try:
         global mcp_tools
         
@@ -104,8 +104,8 @@ def process_transcription(audio_file, request: gr.Request):
             if not transcription_tool:
                 return "Error: Transcription tool not found in MCP client"
             
-            # Call the tool with the audio file URL
-            result = transcription_tool(audio_file=file_url)
+            # Call the tool with the audio file URL and GROQ API key
+            result = transcription_tool(audio_file=file_url, api_key=groq_api_key)
             return result
             
     except Exception as e:
@@ -115,7 +115,7 @@ def process_transcription(audio_file, request: gr.Request):
         return f"Error: {str(e)}"
 
 # Main chat function (streaming, with tool usage)
-def chat_with_tools(user_message, history, audio_file, request: gr.Request):
+def chat_with_tools(user_message, history, audio_file, groq_api_key, request: gr.Request):
     # Add user message
     history = history or []
     messages = format_history(history)
@@ -146,6 +146,16 @@ def chat_with_tools(user_message, history, audio_file, request: gr.Request):
     # 2. Tool usage phase - Process transcription if there's an audio file
     if audio_file is not None:
         try:
+            # Check if GROQ API key is provided
+            if not groq_api_key:
+                history.append(ChatMessage(
+                    role="assistant",
+                    content="Please provide a GROQ API key to process the transcription.",
+                    metadata={"title": "ℹ️ Info", "status": "done"}
+                ))
+                yield history
+                return
+                
             # Show tool call status
             yield history + [ChatMessage(
                 role="assistant", 
@@ -153,8 +163,8 @@ def chat_with_tools(user_message, history, audio_file, request: gr.Request):
                 metadata={"title": "🛠️ Tool Usage", "status": "pending"}
             )]
             
-            # Process transcription 
-            tool_result = process_transcription(audio_file, request)
+            # Process transcription with GROQ API key
+            tool_result = process_transcription(audio_file, groq_api_key, request)
             
             if tool_result.startswith("Error:"):
                 history.append(ChatMessage(
@@ -221,6 +231,13 @@ with gr.Blocks() as demo:
                 file_types=[".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".flac", ".ogg", ".aac"],
                 type="filepath"
             )
+            
+            groq_api_key = gr.Textbox(
+                label="GROQ API Key",
+                placeholder="Enter your GROQ API key",
+                type="password",
+                show_label=True
+            )
     
     with gr.Row():
         msg = gr.Textbox(
@@ -232,12 +249,12 @@ with gr.Blocks() as demo:
         btn = gr.Button("Send", scale=1)
     
     # Connect components
-    btn.click(chat_with_tools, [msg, chatbot, audio_file], [chatbot], queue=True)
-    msg.submit(chat_with_tools, [msg, chatbot, audio_file], [chatbot], queue=True)
+    btn.click(chat_with_tools, [msg, chatbot, audio_file, groq_api_key], [chatbot], queue=True)
+    msg.submit(chat_with_tools, [msg, chatbot, audio_file, groq_api_key], [chatbot], queue=True)
     
     # Clear button
     clear = gr.Button("Clear Conversation")
-    clear.click(lambda: (None, None), outputs=[chatbot, audio_file])
+    clear.click(lambda: (None, None, None), outputs=[chatbot, audio_file, groq_api_key])
     
     # Add a custom route to serve audio files
     @demo.app.get("/audio_files/{filename}")
