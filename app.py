@@ -217,109 +217,64 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
     # Format messages for Claude API
     formatted_messages = format_history(history)
     
-    # -------- Chain of Thoughts Display --------
-    # 1. "Thinking" phase - keep this message in history to stack the thought process
-    thinking_message = ChatMessage(
-        role="assistant",
-        content="I need to understand what the user is asking for and determine if I need to use my tools.",
-        metadata={"title": "🧠 Thinking", "status": "pending"}
-    )
-    history.append(thinking_message)
-    yield history
+    # 1. "Thinking" phase
+    yield history + [ChatMessage(role="assistant", content="Let me think...", metadata={"title": "🧠 Thinking", "status": "pending"})]
 
     # Extract URL from message
     audio_url = extract_url(user_message)
     
-    # Update thinking process with URL detection
-    if audio_url:
-        thinking_message.content += f"\n\nI detected a URL in the message: {audio_url}"
-        history[-1] = thinking_message
-    yield history
-
-    # Update thinking status as done before moving to the decision phase
-    thinking_message.metadata["status"] = "done"
-    history[-1] = thinking_message
-    yield history
-
     # 2. Decision phase - Ask Claude to decide if we should use the transcription tool
-        # Create decision message only if audio URL is detected
-    decision_message = ChatMessage(
-                role="assistant",
-        content="Determining if I should use the transcription tool for this URL...",
-        metadata={"title": "🔍 Evaluating Tools", "status": "pending"}
-    )
-    history.append(decision_message)
-    yield history
-
-    use_tool, reasoning = should_use_transcription_tool(user_message, tool_descriptions)
-    print(f"Tool decision: {use_tool}, Reasoning: {reasoning}")
-
-    # Update decision message with the reasoning
-    decision_message.content += f"\n\nDecision: {use_tool}\nReasoning: {reasoning}"
-    decision_message.metadata["status"] = "done"
-    history[-1] = decision_message
-    yield history
-
+    use_tool = False
+    reasoning = ""
+    
+    if audio_url:
+        use_tool, reasoning = should_use_transcription_tool(user_message, tool_descriptions)
+        print(f"Tool decision: {use_tool}, Reasoning: {reasoning}")
+    
     # 3. Tool usage phase - Process transcription if decided to use tool
-    if use_tool:
+    transcription_result = None
+    if use_tool and audio_url:
         try:
             # Check if GROQ API key is available (either from env or user input)
             current_groq_api_key = groq_api_key if groq_api_key else user_groq_api_key
             if not current_groq_api_key:
                 history.append(ChatMessage(
                     role="assistant",
-                            content="Please provide a GROQ API key to process the transcription.",
-                            metadata={"title": "ℹ️ Info", "status": "done"}
+                    content="Please provide a GROQ API key to process the transcription.",
+                    metadata={"title": "ℹ️ Info", "status": "done"}
                 ))
                 yield history
                 return
-
-            # Show tool call status - this stays in history
-            tool_message = ChatMessage(
+        
+            # Show tool call status
+            yield history + [ChatMessage(
                 role="assistant",
                 content=f"Processing audio from URL: {audio_url}...",
-                metadata={"title": "🛠️ Using Transcription Tool", "status": "pending"}
-            )
-            history.append(tool_message)
-            yield history
-
+                metadata={"title": "🛠️ Tool Usage", "status": "pending"}
+            )]
+        
             # Process transcription with GROQ API key
             transcription_result = process_transcription_from_url(audio_url, user_groq_api_key)
         
-            # Update tool message with status
-            if transcription_result and not transcription_result.startswith("Error:"):
-                tool_message.content += f"\n\nTranscription successfully completed."
-                tool_message.metadata["status"] = "done"
-                history[-1] = tool_message
-                yield history
-
             if transcription_result and transcription_result.startswith("Error:"):
-                # Update tool message with error
-                tool_message.content += f"\n\n{transcription_result}"
-                tool_message.metadata = {"title": "❌ Error", "status": "done"}
-                history[-1] = tool_message
+                history.append(ChatMessage(
+                    role="assistant",
+                    content=transcription_result,
+                    metadata={"title": "❌ Error", "status": "done"}
+                ))
                 yield history
                 return
             elif transcription_result:
-                # Add transcript result to history as a separate message
+                # Add transcript result to history
                 history.append(ChatMessage(
                     role="assistant",
                     content=f"**Transcription Result:**\n\n{transcription_result}",
                     metadata={"title": "🎙️ Transcription", "status": "done"}
                 ))
                 yield history
-
-                # Now let Claude respond to the transcript
+                    
+                    # Now let Claude respond to the transcript
                 try:
-                    # Show thinking process for response generation
-                    thinking_response = ChatMessage(
-                        role="assistant",
-                        content="Generating a response based on the transcription...",
-                        metadata={"title": "💭 Formulating Response", "status": "pending"}
-                    )
-                    history.append(thinking_response)
-                    yield history
-
                     # Create a new prompt for Claude to respond to the transcript
                     claude_prompt = f"You've just transcribed this audio for the user:\n\n{transcription_result}\n\nPlease respond to the user about this transcript. Remember to add the transcript content in your response, but do not add unnecessary analysis or comments unless the user asks for it. Consider asking follow-up questions about what the user might want to do with the transcript."
                     
@@ -330,12 +285,6 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
                         system="You are a helpful assistant that can transcribe audio using MCP tools and respond to user queries. When you respond to the user about a transcript, provide a clear and concise answer. Don't add unnecessary analysis or comments unless the user asks for it. Consider adding follow-up questions about what the user might want to do with the transcript.",
                         messages=[{"role": "user", "content": claude_prompt}]
                         )
-    
-                    # Update thinking message as completed
-                    thinking_response.content += "\n\nResponse ready!"
-                    thinking_response.metadata["status"] = "done"
-                    history[-1] = thinking_response
-                    yield history
 
                     # Add Claude's response to history
                     response_content = response.content[0].text
@@ -357,6 +306,7 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
                     metadata={"title": "❌ Error", "status": "done"}
                 ))
                 yield history
+                return
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
@@ -369,8 +319,8 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             ))
             yield history
             return
-    elif "transcription" in user_message.lower() or "transcript" in user_message.lower():
-        # User asking about transcription but no URL provided
+    elif use_tool and not audio_url:
+        # User wants transcription but didn't provide URL
         history.append(ChatMessage(
             role="assistant",
             content="I'd like to help with audio transcription, but I need a URL to the audio file. Please provide a direct link to the audio you want to transcribe.",
@@ -379,17 +329,8 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
         yield history
         return
 
-    # 4. Claude response phase - for regular chat or when tool isn't needed
+        # 4. Claude response phase - for regular chat or when tool isn't needed
     try:
-        # Show thinking process for regular response
-        thinking_regular = ChatMessage(
-            role="assistant",
-            content="Generating a response to your question...",
-            metadata={"title": "💭 Formulating Response", "status": "pending"}
-    )
-        history.append(thinking_regular)
-        yield history
-
         # Provide system prompt with tools information
         system_prompt = f"""You are a helpful assistant that can transcribe audio using specialized tools.
 
@@ -414,12 +355,6 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             system=system_prompt,
             messages=formatted_messages
         )
-
-        # Update thinking message as completed
-        thinking_regular.content += "\n\nResponse ready!"
-        thinking_regular.metadata["status"] = "done"
-        history[-1] = thinking_regular
-        yield history
 
         response_content = response.content[0].text
         history.append(ChatMessage(role="assistant", content=response_content))
@@ -448,9 +383,8 @@ with gr.Blocks() as demo:
             chatbot = gr.Chatbot(
                 type="messages", 
                 label="Claude Agent",
-                height=600,
-                show_copy_button=True
-            )
+                height=600
+        )
         with gr.Column(scale=1):
             # Display API key inputs only if environment variables are not set
             anthropic_api_key_input = gr.Textbox(
@@ -496,15 +430,6 @@ with gr.Blocks() as demo:
         [],
         [chatbot, msg]  # Clear chatbot history and message input
     )
-
-    # Add some CSS to make the chain of thought messages look better
-    gr.Markdown("""
-    <style>
-    .message-wrap .message.assistant[data-testid] {
-        max-width: 90%;
-    }
-    </style>
-    """)
 
 if __name__ == "__main__":
     demo.launch()
