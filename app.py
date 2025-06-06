@@ -378,14 +378,6 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
         ))
         yield history
         return
-    else:
-        # Tool decision was false, inform user
-        history.append(ChatMessage(
-            role="assistant",
-            content="I don't think this URL requires audio transcription. Let me respond to your message directly.",
-            metadata={"title": "ℹ️ Info", "status": "done"}
-        ))
-        yield history
 
     # 4. Claude response phase - for regular chat or when tool isn't needed
     try:
