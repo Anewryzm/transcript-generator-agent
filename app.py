@@ -122,6 +122,10 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
     audio_url = extract_url(user_message)
     transcript_request = "transcript" in user_message.lower() or "transcribe" in user_message.lower()
     
+    # Flag to track if transcription was performed
+    transcription_performed = False
+    transcription_result = None
+    
     if audio_url and transcript_request:
         try:
             # Check if GROQ API key is available (either from env or user input)
@@ -143,21 +147,35 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             )]
             
             # Process transcription with GROQ API key
-            tool_result = process_transcription_from_url(audio_url, user_groq_api_key)
+            transcription_result = process_transcription_from_url(audio_url, user_groq_api_key)
             
-            if tool_result.startswith("Error:"):
+            if transcription_result.startswith("Error:"):
                 history.append(ChatMessage(
                     role="assistant",
-                    content=tool_result,
+                    content=transcription_result,
                     metadata={"title": "❌ Error", "status": "done"}
                 ))
             else:
                 # Add tool result to history
                 history.append(ChatMessage(
                     role="assistant",
-                    content=f"**Transcription Result:**\n\n{tool_result}",
+                    content=f"**Transcription Result:**\n\n{transcription_result}",
                     metadata={"title": "🎙️ Transcription", "status": "done"}
                 ))
+                transcription_performed = True
+                
+                # Add the transcription result to messages for Claude to be aware of it
+                messages.append({
+                    "role": "assistant", 
+                    "content": f"I've transcribed the audio from the URL. Here's the result:\n\n{transcription_result}"
+                })
+                
+                # Add a user message to prompt Claude to respond to the transcription
+                messages.append({
+                    "role": "user",
+                    "content": "Please analyze this transcription and provide your thoughts or follow-up on my original request."
+                })
+                
             yield history
         except Exception as e:
             import traceback
@@ -178,15 +196,26 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             metadata={"title": "ℹ️ Info", "status": "done"}
         ))
         yield history
+        return
 
-    # 3. Claude response phase
+    # 3. Claude response phase - only if we haven't returned early
     try:
+        # If transcription was performed, Claude will now respond to the transcription
         response = client.messages.create(
             model="claude-3-7-sonnet-latest",
             max_tokens=4096,
             messages=messages
         )
-        history.append(ChatMessage(role="assistant", content=response.content[0].text))
+        
+        response_content = response.content[0].text
+        
+        # For clarity in the UI, if transcription was performed, 
+        # we can add a prefix to indicate Claude is responding to the transcription
+        if transcription_performed:
+            prefix = "**Analysis of the transcription:**\n\n"
+            history.append(ChatMessage(role="assistant", content=prefix + response_content))
+        else:
+            history.append(ChatMessage(role="assistant", content=response_content))
     except Exception as e:
         history.append(ChatMessage(
             role="assistant",
