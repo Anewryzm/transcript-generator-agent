@@ -274,7 +274,7 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
                     # Now let Claude respond to the transcript
                 try:
                     # Create a new prompt for Claude to respond to the transcript
-                    claude_prompt = f"You've just transcribed this audio for the user:\n\n{transcription_result}\n\nPlease respond to the user about this transcript."
+                    claude_prompt = f"You've just transcribed this audio for the user:\n\n{transcription_result}\n\nPlease respond to the user about this transcript. Remember to add the transcript content in your response, but do not add unnecessary analysis or comments unless the user asks for it. Consider asking follow-up questions about what the user might want to do with the transcript."
                     
                     # Send request to Claude
                     response = client.messages.create(
