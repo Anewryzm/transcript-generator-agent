@@ -1,6 +1,10 @@
 ---
-title: transcript-generator-client
-app_file: app.py
+title: Transcript Generator Agent
 sdk: gradio
 sdk_version: 5.33.0
+app_file: app.py
+pinned: false
+short_description: A transcript generator agent powered by MCP servers
 ---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
