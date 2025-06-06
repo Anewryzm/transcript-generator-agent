@@ -143,6 +143,8 @@ def should_use_transcription_tool(prompt, available_tools):
             1. "use_tool": true/false - whether to use the transcription tool
             2. "reasoning": brief explanation of your decision
 
+            It should start with a '{' and end with a '}'.
+
             Respond with true ONLY if:
             - The user is clearly asking for audio transcription
             - OR the user shared an audio URL and wants to know what's in it
@@ -234,6 +236,11 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
         history[-1] = thinking_message
     yield history
 
+    # Update thinking status as done before moving to the decision phase
+    thinking_message.metadata["status"] = "done"
+    history[-1] = thinking_message
+    yield history
+
     # 2. Decision phase - Ask Claude to decide if we should use the transcription tool
         # Create decision message only if audio URL is detected
     decision_message = ChatMessage(
@@ -261,8 +268,8 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             if not current_groq_api_key:
                 history.append(ChatMessage(
                     role="assistant",
-                    content="Please provide a GROQ API key to process the transcription.",
-                    metadata={"title": "ℹ️ Info", "status": "done"}
+                            content="Please provide a GROQ API key to process the transcription.",
+                            metadata={"title": "ℹ️ Info", "status": "done"}
                 ))
                 yield history
                 return
@@ -309,7 +316,7 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
                         role="assistant",
                         content="Generating a response based on the transcription...",
                         metadata={"title": "💭 Formulating Response", "status": "pending"}
-    )
+                    )
                     history.append(thinking_response)
                     yield history
 
@@ -349,6 +356,7 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
                     content="I wasn't able to get a transcription result. Please check the URL and try again.",
                     metadata={"title": "❌ Error", "status": "done"}
                 ))
+                yield history
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
@@ -361,14 +369,6 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             ))
             yield history
             return
-        else:
-            # Tool decision was false, inform user
-            history.append(ChatMessage(
-                role="assistant",
-                    content="I don't think this URL requires audio transcription. Let me respond to your message directly.",
-                metadata={"title": "ℹ️ Info", "status": "done"}
-            ))
-            yield history
     elif "transcription" in user_message.lower() or "transcript" in user_message.lower():
         # User asking about transcription but no URL provided
         history.append(ChatMessage(
@@ -378,12 +378,14 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
         ))
         yield history
         return
-
-    # Update thinking status as done before moving to final response
-    thinking_message.content += "\n\nAnalysis complete."
-    thinking_message.metadata["status"] = "done"
-    history[-1] = thinking_message
-    yield history
+    else:
+        # Tool decision was false, inform user
+        history.append(ChatMessage(
+            role="assistant",
+            content="I don't think this URL requires audio transcription. Let me respond to your message directly.",
+            metadata={"title": "ℹ️ Info", "status": "done"}
+        ))
+        yield history
 
     # 4. Claude response phase - for regular chat or when tool isn't needed
     try:
