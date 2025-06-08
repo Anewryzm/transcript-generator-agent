@@ -417,6 +417,11 @@ with gr.Blocks() as demo:
     # Connect components
     btn.click(chat_with_tools, [msg, chatbot, groq_api_key_input, anthropic_api_key_input], [chatbot], queue=True)
     msg.submit(chat_with_tools, [msg, chatbot, groq_api_key_input, anthropic_api_key_input], [chatbot], queue=True)
+
+    # Clear message input field after sending
+    def clear_message_input():
+        return ""
+    msg.submit(clear_message_input, [], [msg], queue=False)
     
     # Clear button
     clear = gr.Button("Clear Conversation")
