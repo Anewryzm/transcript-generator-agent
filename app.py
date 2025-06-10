@@ -226,7 +226,7 @@ def should_use_transcription_tool(prompt, available_tools):
         return False, f"Error: {str(e)}"
 
 # Function to decide if TTS tool should be used
-def should_use_tts_tool(prompt):
+def should_use_tts_tool(prompt, history=None):
     try:
         if not client:
             print("No Claude client available for TTS tool decision")
@@ -253,6 +253,8 @@ def should_use_tts_tool(prompt):
             When deciding what text to convert:
             - If the user provides specific text in quotes or after phrases like "convert this to speech:", use that exact text
             - If the user asks to convert their previous message, use that as the text
+            - If the user refers to content from the conversation history, extract that content
+            - If the user asks to convert the transcript or other previous content, find that in the history
             - If the user doesn't specify text but clearly wants TTS, ask them to provide the text
 
             Respond with false if:
@@ -260,12 +262,24 @@ def should_use_tts_tool(prompt):
             - The user is asking about transcription (speech-to-text) instead
             """
 
+        # Prepare the messages for Claude
+        messages = []
+        if history:
+            # Include history in the context to allow referencing previous messages
+            formatted_history = format_history(history)
+            messages = formatted_history
+            # Add the user's current prompt as the final message
+            messages.append({"role": "user", "content": prompt})
+        else:
+            # If no history, just use the current prompt
+            messages = [{"role": "user", "content": f"User message: {prompt}"}]
+
         # Ensure we're sending a valid message
         response = client.messages.create(
             model="claude-3-7-sonnet-latest",
             max_tokens=500,
             system=system_prompt,
-            messages=[{"role": "user", "content": f"User message: {prompt}"}]
+            messages=messages
         )
         
         response_content = response.content[0].text
@@ -321,7 +335,8 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
     audio_url = extract_url(user_message)
     
     # 2. Decision phase - First check if we should use the TTS tool
-    use_tts, tts_reasoning, text_to_convert = should_use_tts_tool(user_message)
+    # Pass the full history to the TTS decision function
+    use_tts, tts_reasoning, text_to_convert = should_use_tts_tool(user_message, history[:-1])  # Exclude the current message
     
     # 3a. Tool usage phase - Process TTS if decided to use that tool
     if use_tts:
