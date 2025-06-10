@@ -2,6 +2,11 @@ import gradio as gr
 import anthropic
 import os
 import json
+import requests
+import base64
+import tempfile
+import time
+from pathlib import Path
 from dotenv import load_dotenv
 from smolagents.mcp_client import MCPClient
 from gradio import ChatMessage
@@ -12,12 +17,16 @@ load_dotenv()
 # Get API keys from environment or use None as default
 anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
 groq_api_key = os.environ.get("GROQ_API_KEY")
+tts_api_url_base = os.environ.get("TTS_API_URL")
 
 # Initialize Anthropic client (will be updated if user provides a key)
 client = anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
 
 # MCP connection details
 mcp_url = "https://agents-mcp-hackathon-transcript-generator.hf.space/gradio_api/mcp/sse"
+
+# TTS API endpoint
+tts_api_url = tts_api_url_base+"/generate"
 
 # Global variable to store tools
 mcp_tools = {}
@@ -118,6 +127,44 @@ def process_transcription_from_url(audio_url, user_groq_api_key):
         print(traceback.format_exc())
         return f"Error: {str(e)}"
 
+# Generate speech from text using the TTS API
+def generate_speech_from_text(text):
+    try:
+        # Prepare the request data
+        payload = {"prompt": text}
+        headers = {"Content-Type": "application/json"}
+        
+        print(f"Sending TTS request for text (length): {len(text)}")
+        
+        # Make the POST request to the TTS API
+        response = requests.post(tts_api_url, json=payload, headers=headers)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            print(f"TTS response received. Content-Type: {response.headers.get('Content-Type')}")
+            
+            # Ensure the output directory exists
+            output_dir = Path("generated_audio")
+            output_dir.mkdir(exist_ok=True)
+            
+            # Create a file to store the audio with a timestamp to avoid conflicts
+            timestamp = int(time.time())
+            audio_file_path = output_dir / f"speech_{timestamp}.wav"
+            
+            # Write the audio bytes to the file
+            with open(audio_file_path, "wb") as f:
+                f.write(response.content)
+            
+            print(f"Audio saved to file: {audio_file_path}")
+            return str(audio_file_path)
+        else:
+            return f"Error: API returned status code {response.status_code} - {response.text}"
+    except Exception as e:
+        import traceback
+        print(f"TTS error: {e}")
+        print(traceback.format_exc())
+        return f"Error: {str(e)}"
+
 # Extract URL from message
 def extract_url(message):
     import re
@@ -128,7 +175,7 @@ def extract_url(message):
         return match.group(0)
     return None
 
-# Function to decide if tool should be used
+# Function to decide if transcription tool should be used
 def should_use_transcription_tool(prompt, available_tools):
     try:
         if not client:
@@ -191,6 +238,69 @@ def should_use_transcription_tool(prompt, available_tools):
         # Default to not using tool if there's an error
         return False, f"Error: {str(e)}"
 
+# Function to decide if TTS tool should be used
+def should_use_tts_tool(prompt):
+    try:
+        if not client:
+            print("No Claude client available for TTS tool decision")
+            # Default to not using tool since we can't ask Claude
+            return False, "No Claude client available for decision", ""
+
+        system_prompt = """You are an AI assistant deciding whether to use a text-to-speech (TTS) tool. 
+            You have access to a TTS tool that can generate speech audio from text.
+
+            You should ONLY respond with a pure JSON object that includes:
+            1. "use_tool": true/false - whether to use the TTS tool
+            2. "reasoning": brief explanation of your decision
+            3. "text_to_convert": If use_tool is true, include the text that should be converted to speech. 
+               Extract this from the user's message or generate appropriate text based on their request.
+
+            It should start with a '{' and end with a '}'.
+
+            Respond with true ONLY if:
+            - The user is clearly asking to generate speech or audio from text
+            - OR the user wants text read aloud
+            - OR the user wants to create a voiceover or narration
+            - OR the user explicitly mentions text-to-speech or TTS
+            
+            When deciding what text to convert:
+            - If the user provides specific text in quotes or after phrases like "convert this to speech:", use that exact text
+            - If the user asks to convert their previous message, use that as the text
+            - If the user doesn't specify text but clearly wants TTS, ask them to provide the text
+
+            Respond with false if:
+            - The user is just chatting or asking questions not related to speech generation
+            - The user is asking about transcription (speech-to-text) instead
+            """
+
+        # Ensure we're sending a valid message
+        response = client.messages.create(
+            model="claude-3-7-sonnet-latest",
+            max_tokens=500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": f"User message: {prompt}"}]
+        )
+        
+        response_content = response.content[0].text
+        print(f"TTS tool decision response: {response_content}")
+        
+        # Try to parse the JSON response
+        try:
+            result = json.loads(response_content)
+            text_to_convert = result.get("text_to_convert", "")
+            return result.get("use_tool", False), result.get("reasoning", "No reasoning provided"), text_to_convert
+        except json.JSONDecodeError:
+            print(f"Failed to parse JSON response: {response_content}")
+            # Fallback: check if the response contains "true"
+            return "true" in response_content.lower(), "Failed to parse JSON response", ""
+
+    except Exception as e:
+        import traceback
+        print(f"Error in TTS tool decision: {e}")
+        print(traceback.format_exc())
+        # Default to not using tool if there's an error
+        return False, f"Error: {str(e)}", ""
+
 # Main chat function (streaming, with tool usage)
 def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api_key):
     global client, anthropic_api_key, groq_api_key, tool_descriptions
@@ -220,20 +330,110 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
     # 1. "Thinking" phase
     yield history + [ChatMessage(role="assistant", content="Let me think...", metadata={"title": "🧠 Thinking", "status": "pending"})]
 
-    # Extract URL from message
+    # Extract URL from message for transcription
     audio_url = extract_url(user_message)
     
-    # 2. Decision phase - Ask Claude to decide if we should use the transcription tool
-    use_tool = False
-    reasoning = ""
+    # 2. Decision phase - First check if we should use the TTS tool
+    use_tts, tts_reasoning, text_to_convert = should_use_tts_tool(user_message)
     
-    if audio_url:
-        use_tool, reasoning = should_use_transcription_tool(user_message, tool_descriptions)
-        print(f"Tool decision: {use_tool}, Reasoning: {reasoning}")
+    # 3a. Tool usage phase - Process TTS if decided to use that tool
+    if use_tts:
+        try:
+            # Show tool call status
+            yield history + [ChatMessage(
+                role="assistant",
+                content=f"Generating speech from text...",
+                metadata={"title": "🔊 Text-to-Speech", "status": "pending"}
+            )]
+            
+            # If no text was provided for conversion, ask the user
+            if not text_to_convert:
+                history.append(ChatMessage(
+                    role="assistant",
+                    content="I'd be happy to generate speech audio for you! Could you please provide the text you want me to convert to speech?",
+                    metadata={"title": "ℹ️ Info", "status": "done"}
+                ))
+                yield history
+                return
+            
+            # Process text-to-speech
+            audio_file_path = generate_speech_from_text(text_to_convert)
+            
+            if audio_file_path and isinstance(audio_file_path, str) and audio_file_path.startswith("Error:"):
+                history.append(ChatMessage(
+                    role="assistant",
+                    content=audio_file_path,
+                    metadata={"title": "❌ Error", "status": "done"}
+                ))
+                yield history
+                return
+            elif audio_file_path:
+                # Add the audio component message
+                audio_display_message = f"""I've generated speech audio from your text. You can play it below:
+
+<audio controls src="/file={audio_file_path}" style="width: 100%;"></audio>
+
+The text that was converted: "{text_to_convert}"
+"""
+                history.append(ChatMessage(
+                    role="assistant", 
+                    content=audio_display_message,
+                    metadata={"title": "🔊 Speech Generated", "status": "done"}
+                ))
+                
+                yield history
+                
+                # Let Claude provide a response about the generated audio
+                try:
+                    # Create a prompt for Claude to respond about the TTS generation
+                    claude_prompt = f"You've just generated speech audio for the user from this text: \"{text_to_convert}\". Please provide a brief, helpful response. You might ask if the audio meets their needs or if they'd like to convert more text."
+                    
+                    # Send request to Claude
+                    response = client.messages.create(
+                        model="claude-3-7-sonnet-latest",
+                        max_tokens=1024,
+                        system="You are a helpful assistant that can convert text to speech using specialized tools. When responding to the user about generated speech, be brief and helpful. Don't repeat the full text that was converted unless it's very short.",
+                        messages=[{"role": "user", "content": claude_prompt}]
+                    )
+                    
+                    # Add Claude's response to history
+                    response_content = response.content[0].text
+                    history.append(ChatMessage(role="assistant", content=response_content))
+                    yield history
+                    return
+                except Exception as e:
+                    print(f"Error generating response about TTS: {str(e)}")
+                    # Continue without Claude's additional response
+            else:
+                history.append(ChatMessage(
+                    role="assistant",
+                    content="I wasn't able to generate speech from your text. Please try again with different text.",
+                    metadata={"title": "❌ Error", "status": "done"}
+                ))
+                yield history
+                return
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"TTS error details: {error_details}")
+            
+            history.append(ChatMessage(
+                role="assistant",
+                content=f"Error generating speech: {str(e)}",
+                metadata={"title": "❌ Error", "status": "done"}
+            ))
+            yield history
+            return
     
-    # 3. Tool usage phase - Process transcription if decided to use tool
-    transcription_result = None
-    if use_tool and audio_url:
+    # 2b. If not using TTS, check if we should use the transcription tool
+    if not use_tts and audio_url:
+        use_transcription, transcription_reasoning = should_use_transcription_tool(user_message, tool_descriptions)
+        print(f"Tool decision: {use_transcription}, Reasoning: {transcription_reasoning}")
+    else:
+        use_transcription = False
+    
+    # 3b. Process transcription if decided to use that tool
+    if use_transcription and audio_url:
         try:
             # Check if GROQ API key is available (either from env or user input)
             current_groq_api_key = groq_api_key if groq_api_key else user_groq_api_key
@@ -319,7 +519,7 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
             ))
             yield history
             return
-    elif use_tool and not audio_url:
+    elif use_transcription and not audio_url:
         # User wants transcription but didn't provide URL
         history.append(ChatMessage(
             role="assistant",
@@ -332,20 +532,22 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
         # 4. Claude response phase - for regular chat or when tool isn't needed
     try:
         # Provide system prompt with tools information
-        system_prompt = f"""You are a helpful assistant that can transcribe audio using specialized tools.
+        system_prompt = f"""You are a helpful assistant that can transcribe audio and generate speech from text using specialized tools.
 
         Available tools:
         - Audio transcription: You can convert speech in audio files to text when users provide audio URLs
+        - Text-to-Speech: You can convert text to speech audio when users want to generate spoken content
 
         Tool usage guidelines:
-        - The system has already determined that the transcription tool should not be used for this message
+        - The system has already determined that neither the transcription nor TTS tools should be used for this message
         - If the user asks about transcribing audio but didn't provide a URL, tell them you need an audio URL
-        - For other queries, respond normally without mentioning the transcription functionality unless relevant
+        - If the user asks about generating speech but didn't provide text, tell them you need the text to convert
+        - For other queries, respond normally
 
         When responding to general questions:
         - Provide helpful and accurate information
         - Be concise and direct
-        - If the user's message suggests they might want to transcribe audio later, you can mention this capability
+        - If the user's message suggests they might want to use either tool later, you can mention these capabilities
         """
         # Debug message format
         print(f"Sending {len(formatted_messages)} messages to Claude")
@@ -376,14 +578,20 @@ initialize_tools()
 
 # Create the Gradio interface
 with gr.Blocks() as demo:
-    gr.Markdown("# Claude 3.7 Sonnet Chat with Transcription Tools")
-    gr.Markdown("Send a message with an audio URL to generate a transcript using the MCP server.")
+    gr.Markdown("# Claude 3.7 Sonnet Chat with Tools")
+    gr.Markdown("Send a message with an audio URL to generate a transcript, or ask to generate speech from text.")
+    
+    # Create a directory for generated audio files if it doesn't exist
+    generated_audio_dir = Path("generated_audio")
+    generated_audio_dir.mkdir(exist_ok=True)
+    
     with gr.Row():
         with gr.Column(scale=4):
             chatbot = gr.Chatbot(
                 type="messages", 
                 label="Claude Agent",
-                height=600
+                height=600,
+                render=True  # Enable HTML rendering for audio player
         )
         with gr.Column(scale=1):
             # Display API key inputs only if environment variables are not set
@@ -407,7 +615,7 @@ with gr.Blocks() as demo:
     
     with gr.Row():
         msg = gr.Textbox(
-            placeholder="Ask a question or share an audio URL to get a transcript...",
+            placeholder="Ask a question, share an audio URL for transcription, or request text-to-speech...",
             show_label=False,
             container=False,
             scale=9
