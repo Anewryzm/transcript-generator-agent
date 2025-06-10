@@ -143,20 +143,7 @@ def generate_speech_from_text(text):
         if response.status_code == 200:
             print(f"TTS response received. Content-Type: {response.headers.get('Content-Type')}")
             
-            # Ensure the output directory exists
-            output_dir = Path("generated_audio")
-            output_dir.mkdir(exist_ok=True)
-            
-            # Create a file to store the audio with a timestamp to avoid conflicts
-            timestamp = int(time.time())
-            audio_file_path = output_dir / f"speech_{timestamp}.wav"
-            
-            # Write the audio bytes to the file
-            with open(audio_file_path, "wb") as f:
-                f.write(response.content)
-            
-            print(f"Audio saved to file: {audio_file_path}")
-            return str(audio_file_path)
+            return response.content  # Return the raw audio bytes
         else:
             return f"Error: API returned status code {response.status_code} - {response.text}"
     except Exception as e:
@@ -357,53 +344,36 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
                 return
             
             # Process text-to-speech
-            audio_file_path = generate_speech_from_text(text_to_convert)
+            audio_data = generate_speech_from_text(text_to_convert)
             
-            if audio_file_path and isinstance(audio_file_path, str) and audio_file_path.startswith("Error:"):
+            if isinstance(audio_data, str) and audio_data.startswith("Error:"):
                 history.append(ChatMessage(
                     role="assistant",
-                    content=audio_file_path,
+                    content=audio_data,
                     metadata={"title": "❌ Error", "status": "done"}
                 ))
                 yield history
                 return
-            elif audio_file_path:
-                # Add the audio component message
-                audio_display_message = f"""I've generated speech audio from your text. You can play it below:
+            elif audio_data:
+                # Convert audio data to base64 for embedding directly in HTML
+                base64_audio = base64.b64encode(audio_data).decode('utf-8')
+                
+                # Create a response with the audio player using data URL
+                response_with_audio = f"""I've converted your text to speech. Here's the audio:
 
-<audio controls src="/file={audio_file_path}" style="width: 100%;"></audio>
+    <audio controls src="data:audio/wav;base64,{base64_audio}" style="width: 100%;"></audio>
 
-The text that was converted: "{text_to_convert}"
-"""
+    The text that was converted: "{text_to_convert}"
+
+    How does the audio sound? Let me know if you'd like to generate speech from any other text.
+    """
                 history.append(ChatMessage(
                     role="assistant", 
-                    content=audio_display_message,
-                    metadata={"title": "🔊 Speech Generated", "status": "done"}
+                    content=response_with_audio
                 ))
                 
                 yield history
-                
-                # Let Claude provide a response about the generated audio
-                try:
-                    # Create a prompt for Claude to respond about the TTS generation
-                    claude_prompt = f"You've just generated speech audio for the user from this text: \"{text_to_convert}\". Please provide a brief, helpful response. You might ask if the audio meets their needs or if they'd like to convert more text."
-                    
-                    # Send request to Claude
-                    response = client.messages.create(
-                        model="claude-3-7-sonnet-latest",
-                        max_tokens=1024,
-                        system="You are a helpful assistant that can convert text to speech using specialized tools. When responding to the user about generated speech, be brief and helpful. Don't repeat the full text that was converted unless it's very short.",
-                        messages=[{"role": "user", "content": claude_prompt}]
-                    )
-                    
-                    # Add Claude's response to history
-                    response_content = response.content[0].text
-                    history.append(ChatMessage(role="assistant", content=response_content))
-                    yield history
-                    return
-                except Exception as e:
-                    print(f"Error generating response about TTS: {str(e)}")
-                    # Continue without Claude's additional response
+                return
             else:
                 history.append(ChatMessage(
                     role="assistant",
@@ -465,40 +435,13 @@ The text that was converted: "{text_to_convert}"
                 yield history
                 return
             elif transcription_result:
-                # Add transcript result to history
+                # Add transcript result to history with direct response
                 history.append(ChatMessage(
                     role="assistant",
-                    content=f"**Transcription Result:**\n\n{transcription_result}",
-                    metadata={"title": "🎙️ Transcription", "status": "done"}
+                    content=f"I've transcribed the audio for you. Here's what I found:\n\n{transcription_result}\n\nIs there anything specific you'd like to know about this transcript?"
                 ))
                 yield history
-                    
-                    # Now let Claude respond to the transcript
-                try:
-                    # Create a new prompt for Claude to respond to the transcript
-                    claude_prompt = f"You've just transcribed this audio for the user:\n\n{transcription_result}\n\nPlease respond to the user about this transcript. Remember to add the transcript content in your response, but do not add unnecessary analysis or comments unless the user asks for it. Consider asking follow-up questions about what the user might want to do with the transcript."
-                    
-                    # Send request to Claude
-                    response = client.messages.create(
-                        model="claude-3-7-sonnet-latest",
-                        max_tokens=4096,
-                        system="You are a helpful assistant that can transcribe audio using MCP tools and respond to user queries. When you respond to the user about a transcript, provide a clear and concise answer. Don't add unnecessary analysis or comments unless the user asks for it. Consider adding follow-up questions about what the user might want to do with the transcript.",
-                        messages=[{"role": "user", "content": claude_prompt}]
-                        )
-
-                    # Add Claude's response to history
-                    response_content = response.content[0].text
-                    history.append(ChatMessage(role="assistant", content=response_content))
-                    yield history
-                    return
-                except Exception as e:
-                    history.append(ChatMessage(
-                        role="assistant",
-                        content=f"Error generating response to transcript: {str(e)}",
-                        metadata={"title": "❌ Error", "status": "done"}
-                    ))
-                    yield history
-                    return
+                return
             else:
                 history.append(ChatMessage(
                     role="assistant",
@@ -580,10 +523,6 @@ initialize_tools()
 with gr.Blocks() as demo:
     gr.Markdown("# Claude 3.7 Sonnet Chat with Tools")
     gr.Markdown("Send a message with an audio URL to generate a transcript, or ask to generate speech from text.")
-    
-    # Create a directory for generated audio files if it doesn't exist
-    generated_audio_dir = Path("generated_audio")
-    generated_audio_dir.mkdir(exist_ok=True)
     
     with gr.Row():
         with gr.Column(scale=4):
