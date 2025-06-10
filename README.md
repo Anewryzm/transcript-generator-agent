@@ -14,11 +14,28 @@ tags:
   - groq
   - whisper
   - smolagents
+  - text-to-speech
+  - speech-to-text
 ---
 
 # Claude 3.7 Sonnet Chat with Transcription Tools
 
 A powerful conversational agent that combines Claude 3.7 Sonnet's capabilities with specialized audio transcription tools. Built for the Gradio Agents & MCP Hackathon 2025 and hosted on Hugging Face Spaces.
+
+## Demo Video
+
+[![Transcript Generator Agent Demo](https://img.youtube.com/vi/GL1jsfIGxXY/0.jpg)](https://youtu.be/GL1jsfIGxXY)
+
+Check out the [demo video](https://youtu.be/GL1jsfIGxXY) to see the agent in action!
+
+### Agent Capabilities
+
+This agent can:
+- Generate transcripts from audio or video files via URL
+- Create audio from text using the Chatterbox model
+- Process both audio and video content for transcription
+- Generate specific text and then convert it to audio for download
+- Run on a GPU instance hosted on modal.com
 
 ## Overview
 
