@@ -16,6 +16,8 @@ tags:
   - smolagents
   - text-to-speech
   - speech-to-text
+  - modal
+demo_video: https://youtu.be/GL1jsfIGxXY
 ---
 
 # Claude 3.7 Sonnet Chat with Transcription Tools
