@@ -69,11 +69,17 @@ def format_history(history):
         print(f"Item {i} type: {type(item)}")
 
         if isinstance(item, dict) and 'role' in item and 'content' in item:
-            messages.append({"role": item["role"], "content": item["content"]})
+            content = item["content"]
+            # Clean base64 audio data from content before sending to Claude
+            content = clean_base64_audio(content)
+            messages.append({"role": item["role"], "content": content})
         elif hasattr(item, 'role') and hasattr(item, 'content'):
             # Handle ChatMessage objects
             role = item.role
             content = item.content
+
+            # Clean base64 audio data from content before sending to Claude
+            content = clean_base64_audio(content)
 
             # Ensure valid role values for Claude API
             if role not in ["user", "assistant"]:
@@ -84,6 +90,30 @@ def format_history(history):
 
     print(f"Formatted {len(messages)} messages for Claude")
     return messages
+
+# Helper function to clean base64 audio data from message content
+def clean_base64_audio(content):
+    if not isinstance(content, str):
+        return content
+    
+    # Check if there's base64 audio data in the content
+    if "<audio controls src=\"data:audio/wav;base64," in content:
+        # Replace the entire audio tag and base64 data with a placeholder
+        import re
+        cleaned_content = re.sub(
+            r'<audio controls src="data:audio/wav;base64,[^"]*"[^>]*></audio>',
+            '<audio>[BASE64_AUDIO_REMOVED_TO_SAVE_CONTEXT]</audio>',
+            content
+        )
+        
+        # Log the size reduction
+        size_before = len(content)
+        size_after = len(cleaned_content)
+        print(f"Cleaned base64 audio data. Size before: {size_before}, after: {size_after}, saved: {size_before - size_after} bytes")
+        
+        return cleaned_content
+    
+    return content
 
 # Process the transcription using the MCP tool with URL
 def process_transcription_from_url(audio_url, user_groq_api_key):
@@ -260,6 +290,7 @@ def should_use_tts_tool(prompt, history=None):
             Respond with false if:
             - The user is just chatting or asking questions not related to speech generation
             - The user is asking about transcription (speech-to-text) instead
+            - The user is asking about content generation
             """
 
         # Prepare the messages for Claude
@@ -382,6 +413,9 @@ def chat_with_tools(user_message, history, user_groq_api_key, user_anthropic_api
 
     How does the audio sound? Let me know if you'd like to generate speech from any other text.
     """
+                # Store a custom attribute on the message to indicate it has audio
+                # This will be displayed in the UI but the base64 data will be stripped
+                # when sending to Claude
                 history.append(ChatMessage(
                     role="assistant", 
                     content=response_with_audio
